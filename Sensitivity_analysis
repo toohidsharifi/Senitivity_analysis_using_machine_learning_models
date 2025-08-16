@@ -137,3 +137,15 @@ grid on;
 
 writematrix(S_xi_values, 'S_Average_Torque.csv');
 
+
+function Z = func_evaluation(x, net_electromagnetic_torque, net_torque_ripple, net_magnet_mass, net_efficiency)
+
+Average_torque = net_electromagnetic_torque(x');
+Torque_ripple = net_torque_ripple(x');
+Magnet_mass = net_magnet_mass(x');
+Efficiency = net_efficiency(x');
+
+Z1 = [Average_torque, Torque_ripple, Magnet_mass, Efficiency];
+Z = Average_torque;
+
+end
