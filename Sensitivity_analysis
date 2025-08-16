@@ -1,0 +1,139 @@
+clc;
+clear;
+close all;
+
+%% Load models
+
+load("net_efficiency.mat");
+load("net_electromagnetic_torque.mat");
+load("net_magnet_mass.mat");
+load('net_torque_ripple.mat');
+
+%% sensitivity analysis
+
+num_vars = 4; % Number of decision variables
+num_points_per_var = 5; % Number of discrete points to use for each variable's range.
+
+fprintf('Starting Deterministic Grid Sensitivity Analysis...\n');
+fprintf('Number of decision variables: %d\n', num_vars);
+fprintf('Number of points per variable: %d\n', num_points_per_var);
+fprintf('Total number of objective function evaluations: %d\n', num_points_per_var^num_vars);
+
+%% Define Decision Variable Ranges/Distributions
+% Specific uniform bounds for x1 to x7 as provided
+lower_bounds = [4 20 3 0.5];
+upper_bounds = [10 25 5 0.85];
+
+% Check if bounds match the number of variables
+if length(lower_bounds) ~= num_vars || length(upper_bounds) ~= num_vars
+    error('Lower and upper bounds arrays must match num_vars.');
+end
+
+%% 3. Generate Deterministic Grid Samples for Decision Variables
+% Create a cell array where each cell contains the discrete points for a variable
+var_points = cell(1, num_vars);
+for i = 1:num_vars
+    var_points{i} = linspace(lower_bounds(i), upper_bounds(i), num_points_per_var);
+end
+
+[X1, X2, X3, X4] = ndgrid(var_points{1}, var_points{2}, var_points{3}, ...
+    var_points{4});
+
+X_samples_matrix = [X1(:), X2(:), X3(:), X4(:)];
+num_total_evaluations = size(X_samples_matrix, 1);
+
+fprintf('Generated %d deterministic grid samples.\n', num_total_evaluations);
+%% 4. Evaluate Objective Function for all Samples
+Y_samples = zeros(num_total_evaluations, 1);
+for s = 1:num_total_evaluations
+    Y_samples(s) = func_evaluation(X_samples_matrix(s, :), net_electromagnetic_torque, net_torque_ripple, net_magnet_mass, net_efficiency);
+end
+
+fprintf('Evaluated objective function for all samples.\n');
+
+%% 5. Calculate V(y) - Total Variance of the Objective Function
+V_y = var(Y_samples);
+fprintf('Total variance of Y, V(y): %f\n', V_y);
+
+if V_y == 0
+    warning('V(y) is zero. This implies the objective function is constant or has no variance across samples. Sensitivity analysis may not be meaningful.');
+    S_xi_values = zeros(1, num_vars); % All sensitivities will be 0
+    fprintf('Sensitivity values S(xi) are all 0 because V(y) is 0.\n');
+    return; % Exit the function as further calculation is not meaningful
+end
+
+%% 6. Calculate V(E(y/x_i)) for each x_i
+V_E_y_given_xi = zeros(1, num_vars); % To store V(E(y/xi)) for each variable
+S_xi_values = zeros(1, num_vars);    % To store final S(xi) values
+
+fprintf('Calculating V(E(y/xi)) for each variable...\n');
+
+for i = 1:num_vars
+    fprintf('  Processing variable x_%d...\n', i);
+
+    % Get the unique discrete values for the current variable x_i
+    unique_xi_values = var_points{i};
+    num_unique_xi = length(unique_xi_values);
+
+    E_y_given_xi_at_unique_points = zeros(1, num_unique_xi);
+
+    for u = 1:num_unique_xi
+        current_xi_value = unique_xi_values(u);
+
+        % Find all samples where x_i is equal to current_xi_value
+        % Use a small tolerance for floating point comparisons
+        tolerance = 1e-9;
+        idx = abs(X_samples_matrix(:, i) - current_xi_value) < tolerance;
+
+        if any(idx)
+            E_y_given_xi_at_unique_points(u) = mean(Y_samples(idx));
+        else
+            % This case should ideally not happen with a full factorial design
+            % unless num_points_per_var is extremely small and the grid is sparse.
+            E_y_given_xi_at_unique_points(u) = NaN;
+            warning('  No samples found for x_%d = %f. This might indicate an issue with grid generation or tolerance.', i, current_xi_value);
+        end
+    end
+
+    % Remove NaN values (should be none if grid is well-formed)
+    valid_E_y_given_xi = E_y_given_xi_at_unique_points(~isnan(E_y_given_xi_at_unique_points));
+
+    if length(valid_E_y_given_xi) > 1
+        V_E_y_given_xi(i) = var(valid_E_y_given_xi);
+    else
+        V_E_y_given_xi(i) = 0; % If only one unique E(y/xi) value, variance is 0
+        warning('  Not enough unique E(y/xi) values for variable x_%d to calculate V(E(y/xi)) robustly. Consider increasing num_points_per_var.', i);
+    end
+
+    %% 7. Calculate S(xi)
+    S_xi_values(i) = V_E_y_given_xi(i) / V_y;
+end
+
+%% Display Results
+fprintf('\n--- Sensitivity Analysis Results (Deterministic Grid) ---\n');
+fprintf('Variable | V(E(y/xi))     | S(xi) (Contribution to Variance)\n');
+fprintf('---------|----------------|----------------------------------\n');
+for i = 1:num_vars
+    fprintf('x_%-7d| %-15.6f| %-32.6f\n', i, V_E_y_given_xi(i), S_xi_values(i));
+end
+
+fprintf('\nInterpretation: A larger S(xi) value indicates that variable x_i has a greater effect\n');
+fprintf('on the optimization objective (y) by explaining a larger proportion of its total variance.\n');
+fprintf('The sum of S(xi) values is not necessarily 1 in this method, especially if there are\n');
+fprintf('interactions between variables. For a full variance decomposition that sums to 1,\n');
+fprintf('consider Sobol indices (which this method is a first-order approximation of).\n');
+
+%% You can also visualize the results
+figure;
+bar(1:num_vars, S_xi_values);
+title('Sensitivity Indices S(x_i) (Deterministic Grid)');
+xlabel('Decision Variable Index');
+ylabel('S(x_i) Value');
+xticks(1:num_vars);
+xticklabels(arrayfun(@(x) sprintf('x_%d', x), 1:num_vars, 'UniformOutput', false));
+grid on;
+
+%% Save Results
+
+writematrix(S_xi_values, 'S_Average_Torque.csv');
+
